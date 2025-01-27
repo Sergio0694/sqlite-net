@@ -467,7 +467,13 @@ namespace SQLite
 			return SQLiteConnectionPool.Shared.GetConnection (_connectionString);
 		}
 
-		SQLiteConnectionWithLock GetConnectionAndTransactionLock (out object transactionLock)
+		SQLiteConnectionWithLock GetConnectionAndTransactionLock (
+#if NET9_0_OR_GREATER
+			out Lock transactionLock
+#else
+			out object transactionLock
+#endif
+			)
 		{
 			return SQLiteConnectionPool.Shared.GetConnectionAndTransactionLock (_connectionString, out transactionLock);
 		}
@@ -486,7 +492,11 @@ namespace SQLite
 		{
 			return Task.Factory.StartNew (() => {
 				var conn = GetConnection ();
+#if NET9_0_OR_GREATER
+				using (conn.EnterScope ()) {
+#else
 				using (conn.Lock ()) {
+#endif
 					return read (conn);
 				}
 			}, CancellationToken.None, TaskCreationOptions.DenyChildAttach, TaskScheduler.Default);
@@ -496,7 +506,11 @@ namespace SQLite
 		{
 			return Task.Factory.StartNew (() => {
 				var conn = GetConnection ();
+#if NET9_0_OR_GREATER
+				using (conn.EnterScope ()) {
+#else
 				using (conn.Lock ()) {
+#endif
 					return write (conn);
 				}
 			}, CancellationToken.None, TaskCreationOptions.DenyChildAttach, TaskScheduler.Default);
@@ -507,7 +521,11 @@ namespace SQLite
 			return Task.Factory.StartNew (() => {
 				var conn = GetConnectionAndTransactionLock (out var transactionLock);
 				lock (transactionLock) {
+#if NET9_0_OR_GREATER
+					using (conn.EnterScope ()) {
+#else
 					using (conn.Lock ()) {
+#endif
 						return transact (conn);
 					}
 				}
@@ -1175,7 +1193,7 @@ namespace SQLite
 		public Task<T> GetAsync<
 #if NET8_0_OR_GREATER
 			[DynamicallyAccessedMembers (DynamicallyAccessedMemberTypes.All)]
-# endif
+#endif
 			T> (Expression<Func<T, bool>> predicate)
 			where T : new()
 		{
@@ -1675,7 +1693,11 @@ namespace SQLite
 		{
 			return Task.Factory.StartNew (() => {
 				var conn = (SQLiteConnectionWithLock)_innerQuery.Connection;
+#if NET9_0_OR_GREATER
+				using (conn.EnterScope ()) {
+#else
 				using (conn.Lock ()) {
+#endif
 					return read (conn);
 				}
 			}, CancellationToken.None, TaskCreationOptions.DenyChildAttach, TaskScheduler.Default);
@@ -1685,7 +1707,11 @@ namespace SQLite
 		{
 			return Task.Factory.StartNew (() => {
 				var conn = (SQLiteConnectionWithLock)_innerQuery.Connection;
+#if NET9_0_OR_GREATER
+				using (conn.EnterScope ()) {
+#else
 				using (conn.Lock ()) {
+#endif
 					return write (conn);
 				}
 			}, CancellationToken.None, TaskCreationOptions.DenyChildAttach, TaskScheduler.Default);
@@ -1844,7 +1870,11 @@ namespace SQLite
 
 			public SQLiteConnectionString ConnectionString { get; }
 
+#if NET9_0_OR_GREATER
+			public Lock TransactionLock { get; } = new Lock ();
+#else
 			public object TransactionLock { get; } = new object ();
+#endif
 
 			public Entry (SQLiteConnectionString connectionString)
 			{
@@ -1868,7 +1898,11 @@ namespace SQLite
 		}
 
 		readonly Dictionary<string, Entry> _entries = new Dictionary<string, Entry> ();
+#if NET9_0_OR_GREATER
+		readonly Lock _entriesLock = new Lock ();
+#else
 		readonly object _entriesLock = new object ();
+#endif
 
 		static readonly SQLiteConnectionPool _shared = new SQLiteConnectionPool ();
 
@@ -1886,7 +1920,14 @@ namespace SQLite
 			return GetConnectionAndTransactionLock (connectionString, out var _);
 		}
 
-		public SQLiteConnectionWithLock GetConnectionAndTransactionLock (SQLiteConnectionString connectionString, out object transactionLock)
+		public SQLiteConnectionWithLock GetConnectionAndTransactionLock (
+			SQLiteConnectionString connectionString,
+#if NET9_0_OR_GREATER
+			out Lock transactionLock
+#else
+			out object transactionLock
+#endif
+			)
 		{
 			var key = connectionString.UniqueKey;
 			Entry entry;
@@ -1938,7 +1979,11 @@ namespace SQLite
 	/// </summary>
 	public class SQLiteConnectionWithLock : SQLiteConnection
 	{
+#if NET9_0_OR_GREATER
+		readonly Lock _lockPoint = new Lock ();
+#else
 		readonly object _lockPoint = new object ();
+#endif
 
 		/// <summary>
 		/// Initializes a new instance of the <see cref="T:SQLite.SQLiteConnectionWithLock"/> class.
@@ -1965,8 +2010,30 @@ namespace SQLite
 			return SkipLock ? (IDisposable)new FakeLockWrapper() : new LockWrapper (_lockPoint);
 		}
 
-		class LockWrapper : IDisposable
+#if NET9_0_OR_GREATER
+		/// <inheritdoc cref="Lock"/>
+		internal Lock.Scope EnterScope()
 		{
+			return SkipLock ? default : _lockPoint.EnterScope();
+		}
+#endif
+
+		sealed class LockWrapper : IDisposable
+		{
+#if NET9_0_OR_GREATER
+			Lock _lockPoint;
+
+			public LockWrapper (Lock lockPoint)
+			{
+				_lockPoint = lockPoint;
+				_lockPoint.Enter ();
+			}
+
+			public void Dispose ()
+			{
+				_lockPoint.Exit ();
+			}
+#else
 			object _lockPoint;
 
 			public LockWrapper (object lockPoint)
@@ -1979,8 +2046,9 @@ namespace SQLite
 			{
 				Monitor.Exit (_lockPoint);
 			}
+#endif
 		}
-		class FakeLockWrapper : IDisposable
+		sealed class FakeLockWrapper : IDisposable
 		{
 			public void Dispose ()
 			{
